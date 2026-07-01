@@ -790,6 +790,9 @@ function App() {
     let cancelled = false;
     let intervalId;
 
+    // Set page title dynamically depending on cloud sync presence
+    document.title = supabase ? 'Still Here' : 'Ink Writer';
+
     const init = async () => {
       try {
         const db = await openDatabase();
