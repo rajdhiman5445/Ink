@@ -1,0 +1,352 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap');
+
+:root {
+  color-scheme: dark;
+  font-family:
+    Inter,
+    ui-sans-serif,
+    system-ui,
+    -apple-system,
+    BlinkMacSystemFont,
+    sans-serif;
+  background:
+    radial-gradient(circle at top, rgba(120, 112, 102, 0.12), transparent 28%),
+    linear-gradient(180deg, #0c0d0f 0%, #090a0b 100%);
+  color: #ece6dc;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  width: 100%;
+  min-height: 100%;
+  height: auto;
+  margin: 0;
+}
+
+html {
+  overflow-y: auto;
+  scrollbar-gutter: stable;
+}
+
+body {
+  overflow-x: hidden;
+  overflow-y: visible;
+}
+
+#root {
+  min-height: 100%;
+  overflow: visible;
+}
+
+button,
+[contenteditable] {
+  font: inherit;
+}
+
+button {
+  appearance: none;
+}
+
+.app-shell {
+  position: relative;
+  width: 100%;
+  min-height: 100vh;
+  padding: 1rem 1rem 7rem;
+}
+
+.chrome {
+  position: absolute;
+  top: 1rem;
+  left: 1rem;
+  right: 1rem;
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  pointer-events: none;
+}
+
+.chapter-label {
+  font-size: 0.78rem;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: rgba(236, 230, 220, 0.42);
+  user-select: none;
+}
+
+.chapter-label-button {
+  border: 0;
+  padding: 0;
+  background: transparent;
+  cursor: pointer;
+  text-align: left;
+  pointer-events: auto;
+}
+
+.chapter-label-button:hover {
+  color: rgba(236, 230, 220, 0.62);
+}
+
+.chapter-label-button:focus-visible {
+  outline: 2px solid rgba(236, 230, 220, 0.35);
+  outline-offset: 4px;
+}
+
+.controls {
+  display: flex;
+  gap: 0.5rem;
+  pointer-events: auto;
+}
+
+.controls button {
+  width: 2rem;
+  height: 2rem;
+  border: 1px solid rgba(236, 230, 220, 0.11);
+  border-radius: 999px;
+  background: rgba(236, 230, 220, 0.04);
+  color: rgba(236, 230, 220, 0.74);
+  font-size: 0.95rem;
+  line-height: 1;
+  cursor: pointer;
+  transition:
+    background-color 120ms ease,
+    border-color 120ms ease,
+    color 120ms ease;
+}
+
+.controls .export-button {
+  width: auto;
+  padding: 0 0.7rem;
+  font-size: 0.72rem;
+  letter-spacing: 0.02em;
+}
+
+.controls button:hover {
+  background: rgba(236, 230, 220, 0.08);
+  border-color: rgba(236, 230, 220, 0.18);
+  color: rgba(236, 230, 220, 0.92);
+}
+
+.controls button:focus-visible {
+  outline: 2px solid rgba(236, 230, 220, 0.45);
+  outline-offset: 2px;
+}
+
+.editor {
+  width: min(100%, 820px);
+  height: auto;
+  margin: 0 auto;
+  display: block;
+  resize: none;
+  border: 0;
+  outline: none;
+  background: transparent;
+  color: #ece6dc;
+  caret-color: #f5efe6;
+  padding:
+    5.9rem
+    0 2rem;
+  transform: translateX(-1.25rem);
+  overflow: visible;
+  white-space: pre-wrap;
+  word-break: break-word;
+  line-height: 1.72;
+  letter-spacing: 0;
+  font-kerning: normal;
+  font-variant-ligatures: common-ligatures contextual;
+}
+
+.editor::placeholder {
+  color: rgba(236, 230, 220, 0.26);
+}
+
+.save-indicator {
+  position: fixed;
+  right: 1rem;
+  bottom: 1rem;
+  font-size: 0.76rem;
+  letter-spacing: 0.04em;
+  color: rgba(236, 230, 220, 0.44);
+  user-select: none;
+  pointer-events: none;
+}
+
+.stats-overlay {
+  position: fixed;
+  right: 1rem;
+  bottom: 2.75rem;
+  z-index: 2;
+  min-width: 12rem;
+  padding: 0.75rem 0.85rem;
+  border: 1px solid rgba(236, 230, 220, 0.12);
+  border-radius: 0.9rem;
+  background: rgba(10, 11, 13, 0.92);
+  color: rgba(236, 230, 220, 0.88);
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.28);
+  font-size: 0.82rem;
+  line-height: 1.55;
+}
+
+.stats-overlay [data-role='current-words'],
+.stats-overlay [data-role='total-words'] {
+  margin-bottom: 0.45rem;
+  color: #f1ebe1;
+}
+
+.stats-overlay [data-role='total-words'] {
+  margin-bottom: 0;
+}
+
+.chapter-modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 3;
+  display: grid;
+  place-items: center;
+  padding: 1rem;
+  background: rgba(5, 6, 8, 0.64);
+  backdrop-filter: blur(6px);
+}
+
+.chapter-modal,
+.delete-confirm {
+  width: min(100%, 21rem);
+  border: 1px solid rgba(236, 230, 220, 0.11);
+  border-radius: 1rem;
+  background: rgba(10, 11, 13, 0.96);
+  box-shadow: 0 24px 64px rgba(0, 0, 0, 0.42);
+  color: #ece6dc;
+}
+
+.chapter-modal {
+  padding: 0.8rem;
+}
+
+.chapter-modal-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  max-height: min(42vh, 18rem);
+  overflow: auto;
+}
+
+.chapter-modal-list li + li {
+  margin-top: 0.25rem;
+}
+
+.chapter-modal-item,
+.chapter-modal-action {
+  width: 100%;
+  border: 0;
+  border-radius: 0.7rem;
+  background: transparent;
+  color: rgba(236, 230, 220, 0.88);
+  text-align: left;
+  cursor: pointer;
+}
+
+.chapter-modal-item {
+  padding: 0.8rem 0.85rem;
+  font-size: 0.95rem;
+}
+
+.chapter-modal-item:hover,
+.chapter-modal-action:hover:not(:disabled) {
+  background: rgba(236, 230, 220, 0.06);
+}
+
+.chapter-modal-item.is-current {
+  background: rgba(236, 230, 220, 0.1);
+  color: #f5efe6;
+}
+
+.chapter-modal-action {
+  padding: 0.76rem 0.85rem;
+  font-size: 0.88rem;
+}
+
+.chapter-modal-action:disabled {
+  opacity: 0.38;
+  cursor: not-allowed;
+}
+
+.chapter-modal-actions {
+  margin-top: 0.65rem;
+  padding-top: 0.65rem;
+  border-top: 1px solid rgba(236, 230, 220, 0.08);
+  display: grid;
+  gap: 0.25rem;
+}
+
+.delete-confirm {
+  padding: 1rem;
+}
+
+.delete-confirm-title {
+  font-size: 0.96rem;
+  color: #f5efe6;
+}
+
+.delete-confirm-body {
+  margin-top: 0.35rem;
+  font-size: 0.86rem;
+  line-height: 1.55;
+  color: rgba(236, 230, 220, 0.72);
+}
+
+.delete-confirm-actions {
+  margin-top: 0.9rem;
+  display: flex;
+  gap: 0.5rem;
+  justify-content: flex-end;
+}
+
+.delete-confirm .danger {
+  color: #ffdfdf;
+}
+
+@media (max-width: 720px) {
+  .app-shell {
+    padding: 0.75rem 0.75rem 6.5rem;
+  }
+
+  .chrome {
+    top: 0.75rem;
+    left: 0.75rem;
+    right: 0.75rem;
+  }
+
+  .editor {
+    width: min(100%, 100%);
+    padding-top: 5rem;
+    transform: none;
+  }
+
+  .save-indicator {
+    right: 0.75rem;
+    bottom: 0.75rem;
+  }
+
+  .stats-overlay {
+    right: 0.75rem;
+    bottom: 2.5rem;
+  }
+
+  .chapter-modal-backdrop {
+    padding: 0.75rem;
+    place-items: end center;
+  }
+
+  .chapter-modal,
+  .delete-confirm {
+    width: min(100%, 24rem);
+  }
+}
