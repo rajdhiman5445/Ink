@@ -1,6 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import JSZip from 'jszip';
+import { createClient } from '@supabase/supabase-js';
 import './styles.css';
 
 const DB_NAME = 'still-here';
@@ -13,6 +14,10 @@ const DEFAULT_FONT_SIZE = 22;
 const MIN_FONT_SIZE = 16;
 const MAX_FONT_SIZE = 28;
 const SAVE_DELAY_MS = 180;
+
+const supabaseUrl = import.meta.env.VITE_SUPABASE_URL;
+const supabaseAnonKey = import.meta.env.VITE_SUPABASE_ANON_KEY;
+const supabase = supabaseUrl && supabaseAnonKey ? createClient(supabaseUrl, supabaseAnonKey) : null;
 
 function clamp(value, min, max) {
   return Math.min(max, Math.max(min, value));
@@ -58,6 +63,16 @@ async function exportBook(state) {
   downloadBlob(zipBlob, 'chapters.zip');
 }
 
+function exportCurrentChapter(state) {
+  const index = getCurrentChapterIndex(state);
+  const chapter = state.chapters[index];
+  if (!chapter) {
+    return;
+  }
+  const filename = `Chapter ${index + 1}.md`;
+  downloadBlob(new Blob([chapter.content || ''], { type: 'text/markdown;charset=utf-8' }), filename);
+}
+
 
 function createId() {
   return globalThis.crypto?.randomUUID?.() ?? `chapter_${Date.now()}_${Math.random().toString(16).slice(2)}`;
@@ -70,7 +85,7 @@ function createChapter(content = '') {
 function createEmptyState() {
   const chapter = createChapter('');
   return {
-    chapters: [chapter],
+    chapters: [{ ...chapter, updated_at: Date.now() }],
     currentChapterId: chapter.id,
     fontSize: DEFAULT_FONT_SIZE,
     chapterViewStateById: {
@@ -80,6 +95,7 @@ function createEmptyState() {
         scrollTop: 0,
       },
     },
+    metadata_updated_at: Date.now(),
   };
 }
 
@@ -90,6 +106,7 @@ function normalizeState(input) {
     .map((chapter) => ({
       id: typeof chapter?.id === 'string' && chapter.id ? chapter.id : createId(),
       content: typeof chapter?.content === 'string' ? chapter.content : '',
+      updated_at: Number(chapter?.updated_at) || Date.now(),
     }))
     .filter(Boolean);
 
@@ -117,6 +134,7 @@ function normalizeState(input) {
     currentChapterId,
     fontSize: clamp(Number(source.fontSize) || DEFAULT_FONT_SIZE, MIN_FONT_SIZE, MAX_FONT_SIZE),
     chapterViewStateById,
+    metadata_updated_at: Number(source.metadata_updated_at) || Date.now(),
   };
 }
 
@@ -254,6 +272,11 @@ function App() {
   const isPickerOpenRef = useRef(false);
   const deleteConfirmRef = useRef(null);
 
+  const cloudSyncTimerRef = useRef(null);
+  const isSyncingRef = useRef(false);
+  const isSyncPendingRef = useRef(false);
+  const isDeferredSyncUpdateRef = useRef(false);
+
   const [currentChapterIndex, setCurrentChapterIndex] = useState(0);
   const [isStatsOpen, setIsStatsOpen] = useState(false);
   const [isPickerOpen, setIsPickerOpen] = useState(false);
@@ -327,6 +350,12 @@ function App() {
     await exportBook(snapshot);
   };
 
+  const triggerExportCurrentChapter = () => {
+    captureCurrentChapterState();
+    const snapshot = normalizeState(JSON.parse(JSON.stringify(stateRef.current)));
+    exportCurrentChapter(snapshot);
+  };
+
   const syncEditorHeight = () => {
     const editor = editorRef.current;
     if (!editor) {
@@ -357,17 +386,245 @@ function App() {
     }
 
     const { selectionStart, selectionEnd } = getSelectionOffsets(editor);
-    state.chapters[getCurrentChapterIndex(state)] = {
+    const content = normalizeEditorText();
+
+    const prevContent = chapter.content;
+    const prevViewState = state.chapterViewStateById[chapter.id];
+
+    const contentChanged = prevContent !== content;
+    const viewStateChanged =
+      !prevViewState ||
+      prevViewState.selectionStart !== selectionStart ||
+      prevViewState.selectionEnd !== selectionEnd ||
+      prevViewState.scrollTop !== window.scrollY;
+
+    const chapterIndex = getCurrentChapterIndex(state);
+    state.chapters[chapterIndex] = {
       ...chapter,
-      content: normalizeEditorText(),
+      content,
+      updated_at: contentChanged ? Date.now() : (chapter.updated_at || Date.now()),
     };
+
     state.chapterViewStateById[chapter.id] = {
       selectionStart,
       selectionEnd,
       scrollTop: window.scrollY ?? 0,
     };
 
+    if (contentChanged || viewStateChanged) {
+      state.metadata_updated_at = Date.now();
+    }
+
     updateWordCounts();
+  };
+
+  const syncWithCloud = async () => {
+    if (!supabase || !readyRef.current) {
+      return;
+    }
+    if (isSyncingRef.current) {
+      isSyncPendingRef.current = true;
+      return;
+    }
+    isSyncingRef.current = true;
+
+    try {
+      updateSavedLabel('Syncing...');
+
+      const [chaptersRes, metadataRes] = await Promise.all([
+        supabase.from('chapters').select('*'),
+        supabase.from('book_metadata').select('*').eq('id', 'main').maybeSingle()
+      ]);
+
+      if (chaptersRes.error) throw chaptersRes.error;
+      if (metadataRes.error) throw metadataRes.error;
+
+      const remoteChapters = chaptersRes.data || [];
+      const remoteMetadata = metadataRes.data || null;
+
+      const localState = stateRef.current;
+      let localUpdated = false;
+      const chaptersToUpsert = [];
+      const chaptersToDelete = [];
+
+      let activeMetadata;
+      let localMetadataWinning = false;
+
+      if (!remoteMetadata) {
+        localMetadataWinning = true;
+        activeMetadata = {
+          id: 'main',
+          current_chapter_id: localState.currentChapterId,
+          font_size: localState.fontSize,
+          chapter_order: localState.chapters.map((c) => c.id),
+          chapter_view_states: localState.chapterViewStateById,
+          updated_at: new Date(localState.metadata_updated_at || Date.now()).toISOString(),
+        };
+      } else {
+        const remoteUpdatedAt = new Date(remoteMetadata.updated_at).getTime();
+        const localUpdatedAt = localState.metadata_updated_at || 0;
+
+        if (localUpdatedAt > remoteUpdatedAt) {
+          localMetadataWinning = true;
+          activeMetadata = {
+            id: 'main',
+            current_chapter_id: localState.currentChapterId,
+            font_size: localState.fontSize,
+            chapter_order: localState.chapters.map((c) => c.id),
+            chapter_view_states: localState.chapterViewStateById,
+            updated_at: new Date(localState.metadata_updated_at).toISOString(),
+          };
+        } else if (remoteUpdatedAt > localUpdatedAt) {
+          activeMetadata = remoteMetadata;
+          // Keep the local active chapter to prevent disrupting the user's viewport
+          localState.fontSize = remoteMetadata.font_size;
+          localState.chapterViewStateById = remoteMetadata.chapter_view_states || {};
+          localState.metadata_updated_at = remoteUpdatedAt;
+          localUpdated = true;
+        } else {
+          activeMetadata = remoteMetadata;
+        }
+      }
+
+      const activeChapterOrder = activeMetadata.chapter_order || [];
+      const remoteChaptersMap = new Map(remoteChapters.map((c) => [c.id, c]));
+      const localChaptersMap = new Map(localState.chapters.map((c) => [c.id, c]));
+      const mergedChapters = [];
+
+      for (const chapterId of activeChapterOrder) {
+        const localCh = localChaptersMap.get(chapterId);
+        const remoteCh = remoteChaptersMap.get(chapterId);
+
+        if (localCh && remoteCh) {
+          const localTime = localCh.updated_at || 0;
+          const remoteTime = new Date(remoteCh.updated_at).getTime();
+
+          if (localTime > remoteTime) {
+            chaptersToUpsert.push({
+              id: chapterId,
+              content: localCh.content,
+              updated_at: new Date(localTime).toISOString(),
+            });
+            mergedChapters.push(localCh);
+          } else if (remoteTime > localTime) {
+            if (localCh.content !== remoteCh.content) {
+              const updatedCh = {
+                id: chapterId,
+                content: remoteCh.content,
+                updated_at: remoteTime,
+              };
+              mergedChapters.push(updatedCh);
+              localUpdated = true;
+            } else {
+              mergedChapters.push(localCh);
+            }
+          } else {
+            mergedChapters.push(localCh);
+          }
+        } else if (localCh) {
+          chaptersToUpsert.push({
+            id: chapterId,
+            content: localCh.content,
+            updated_at: new Date(localCh.updated_at || Date.now()).toISOString(),
+          });
+          mergedChapters.push(localCh);
+        } else if (remoteCh) {
+          const newLocalCh = {
+            id: chapterId,
+            content: remoteCh.content,
+            updated_at: new Date(remoteCh.updated_at).getTime(),
+          };
+          mergedChapters.push(newLocalCh);
+          localUpdated = true;
+        }
+      }
+
+      if (
+        localUpdated ||
+        mergedChapters.length !== localState.chapters.length ||
+        mergedChapters.some(
+          (c, i) =>
+            c.id !== localState.chapters[i].id ||
+            c.content !== localState.chapters[i].content
+        )
+      ) {
+        localState.chapters = mergedChapters;
+        localUpdated = true;
+      }
+
+      const activeChapterOrderSet = new Set(activeChapterOrder);
+      for (const remoteCh of remoteChapters) {
+        if (!activeChapterOrderSet.has(remoteCh.id)) {
+          chaptersToDelete.push(remoteCh.id);
+        }
+      }
+
+      const networkPromises = [];
+
+      if (localMetadataWinning) {
+        networkPromises.push(supabase.from('book_metadata').upsert(activeMetadata));
+      }
+
+      if (chaptersToUpsert.length > 0) {
+        networkPromises.push(supabase.from('chapters').upsert(chaptersToUpsert));
+      }
+
+      if (chaptersToDelete.length > 0) {
+        networkPromises.push(supabase.from('chapters').delete().in('id', chaptersToDelete));
+      }
+
+      if (networkPromises.length > 0) {
+        const results = await Promise.all(networkPromises);
+        const errorResult = results.find((r) => r.error);
+        if (errorResult) throw errorResult.error;
+      }
+
+      if (localUpdated) {
+        const normalized = normalizeState(localState);
+        stateRef.current = normalized;
+        await writeState(dbRef.current, normalized);
+
+        const isEditing = document.activeElement === editorRef.current;
+        const editor = editorRef.current;
+        if (editor) {
+          const activeCh = getCurrentChapter(normalized);
+          const contentChanged = editor.textContent !== activeCh.content;
+          const currentFontSize = parseFloat(editor.style.fontSize) || normalized.fontSize;
+          const fontSizeChanged = currentFontSize !== normalized.fontSize;
+          const indexChanged = getCurrentChapterIndex(normalized) !== currentChapterIndex;
+
+          if (contentChanged || fontSizeChanged || indexChanged) {
+            if (!isEditing) {
+              setCurrentChapterIndex(getCurrentChapterIndex(normalized));
+              renderCurrentChapter();
+            } else {
+              isDeferredSyncUpdateRef.current = true;
+              editor.style.fontSize = `${normalized.fontSize}px`;
+              syncEditorHeight();
+            }
+          }
+        }
+      }
+
+      updateSavedLabel('Synced');
+      isSyncPendingRef.current = false;
+    } catch (err) {
+      console.error('Cloud sync failed:', err);
+      updateSavedLabel('Sync offline');
+      isSyncPendingRef.current = true;
+    } finally {
+      isSyncingRef.current = false;
+    }
+  };
+
+  const scheduleCloudSync = () => {
+    if (!supabase) {
+      return;
+    }
+    window.clearTimeout(cloudSyncTimerRef.current);
+    cloudSyncTimerRef.current = window.setTimeout(() => {
+      syncWithCloud();
+    }, 2000);
   };
 
   const enqueuePersist = (snapshot) => {
@@ -391,6 +648,7 @@ function App() {
     captureCurrentChapterState();
     const snapshot = normalizeState(JSON.parse(JSON.stringify(stateRef.current)));
     enqueuePersist(snapshot);
+    scheduleCloudSync();
   };
 
   const schedulePersist = () => {
@@ -530,6 +788,7 @@ function App() {
 
   useEffect(() => {
     let cancelled = false;
+    let intervalId;
 
     const init = async () => {
       try {
@@ -542,8 +801,57 @@ function App() {
         dbRef.current = db;
 
         let stored = await readState(db);
+        let fromCloud = false;
+
+        // If local IndexedDB is empty, check remote cloud before initializing a new empty book
+        if (!stored && supabase) {
+          try {
+            updateSavedLabel('Syncing...');
+            const [chaptersRes, metadataRes] = await Promise.all([
+              supabase.from('chapters').select('*'),
+              supabase.from('book_metadata').select('*').eq('id', 'main').maybeSingle()
+            ]);
+
+            if (!chaptersRes.error && !metadataRes.error && metadataRes.data) {
+              const remoteChapters = chaptersRes.data || [];
+              const remoteMetadata = metadataRes.data;
+
+              // Reconstruct the stored book shape from remote tables
+              const chapterOrder = remoteMetadata.chapter_order || [];
+              const remoteChaptersMap = new Map(remoteChapters.map((c) => [c.id, c]));
+              const chapters = [];
+
+              for (const chId of chapterOrder) {
+                const remoteCh = remoteChaptersMap.get(chId);
+                if (remoteCh) {
+                  chapters.push({
+                    id: chId,
+                    content: remoteCh.content,
+                    updated_at: new Date(remoteCh.updated_at).getTime(),
+                  });
+                }
+              }
+
+              if (chapters.length > 0) {
+                stored = {
+                  chapters,
+                  currentChapterId: remoteMetadata.current_chapter_id,
+                  fontSize: remoteMetadata.font_size,
+                  chapterViewStateById: remoteMetadata.chapter_view_states || {},
+                  metadata_updated_at: new Date(remoteMetadata.updated_at).getTime(),
+                };
+                fromCloud = true;
+              }
+            }
+          } catch (cloudErr) {
+            console.error('Failed to query cloud data during initialization:', cloudErr);
+          }
+        }
+
         if (!stored) {
           stored = readLegacyState() ?? createEmptyState();
+          await writeState(db, stored);
+        } else if (fromCloud) {
           await writeState(db, stored);
         }
 
@@ -552,6 +860,13 @@ function App() {
         readyRef.current = true;
         setCurrentChapterIndex(getCurrentChapterIndex(normalized));
         renderCurrentChapter();
+
+        if (supabase) {
+          syncWithCloud();
+          intervalId = window.setInterval(() => {
+            syncWithCloud();
+          }, 30000);
+        }
       } catch {
         if (cancelled) {
           return;
@@ -562,6 +877,13 @@ function App() {
         readyRef.current = true;
         setCurrentChapterIndex(getCurrentChapterIndex(fallback));
         renderCurrentChapter();
+
+        if (supabase) {
+          syncWithCloud();
+          intervalId = window.setInterval(() => {
+            syncWithCloud();
+          }, 30000);
+        }
       }
     };
 
@@ -571,6 +893,9 @@ function App() {
       cancelled = true;
       window.clearTimeout(saveTimerRef.current);
       dbRef.current?.close?.();
+      if (intervalId) {
+        window.clearInterval(intervalId);
+      }
     };
   }, []);
 
@@ -591,18 +916,33 @@ function App() {
         return;
       }
 
+      const newContent = normalizeEditorText();
+      const contentChanged = chapter.content !== newContent;
+
       const chapterIndex = getCurrentChapterIndex(state);
       state.chapters[chapterIndex] = {
         ...chapter,
-        content: normalizeEditorText(),
+        content: newContent,
+        updated_at: contentChanged ? Date.now() : (chapter.updated_at || Date.now()),
       };
 
       const { selectionStart, selectionEnd } = getSelectionOffsets(editor);
+      const prevViewState = state.chapterViewStateById[chapter.id];
+      const viewStateChanged =
+        !prevViewState ||
+        prevViewState.selectionStart !== selectionStart ||
+        prevViewState.selectionEnd !== selectionEnd ||
+        prevViewState.scrollTop !== window.scrollY;
+
       state.chapterViewStateById[chapter.id] = {
         selectionStart,
         selectionEnd,
         scrollTop: window.scrollY ?? 0,
       };
+
+      if (contentChanged || viewStateChanged) {
+        state.metadata_updated_at = Date.now();
+      }
 
       syncEditorHeight();
       updateWordCounts();
@@ -673,6 +1013,12 @@ function App() {
         return;
       }
 
+      if (key === 'x') {
+        event.preventDefault();
+        triggerExportCurrentChapter();
+        return;
+      }
+
       if (key === '+' || key === '=' || key === '-' || key === '_') {
         event.preventDefault();
         adjustFontSize(key === '+' || key === '=' ? 1 : -1);
@@ -688,8 +1034,13 @@ function App() {
     };
 
     const handleVisibilityChange = () => {
-      if (document.visibilityState === 'hidden' && mountedRef.current) {
+      if (!mountedRef.current) {
+        return;
+      }
+      if (document.visibilityState === 'hidden') {
         persistNow();
+      } else if (document.visibilityState === 'visible') {
+        syncWithCloud();
       }
     };
 
@@ -713,6 +1064,27 @@ function App() {
       }
     };
 
+    const handleOnline = () => {
+      if (isSyncPendingRef.current) {
+        syncWithCloud();
+      }
+    };
+
+    const handleBlur = () => {
+      if (isDeferredSyncUpdateRef.current) {
+        isDeferredSyncUpdateRef.current = false;
+        const normalized = normalizeState(stateRef.current);
+        setCurrentChapterIndex(getCurrentChapterIndex(normalized));
+        renderCurrentChapter();
+      }
+    };
+
+    const handleWindowFocus = () => {
+      if (mountedRef.current) {
+        syncWithCloud();
+      }
+    };
+
     editor.addEventListener('input', handleInput);
     editor.addEventListener('keyup', handleSelectionChange);
     editor.addEventListener('mouseup', handleSelectionChange);
@@ -723,6 +1095,9 @@ function App() {
     document.addEventListener('selectionchange', handleSelectionChange);
     document.addEventListener('visibilitychange', handleVisibilityChange);
     document.addEventListener('keydown', handleGlobalKeyDown);
+    window.addEventListener('online', handleOnline);
+    editor.addEventListener('blur', handleBlur);
+    window.addEventListener('focus', handleWindowFocus);
 
     mountedRef.current = true;
 
@@ -738,6 +1113,9 @@ function App() {
       document.removeEventListener('selectionchange', handleSelectionChange);
       document.removeEventListener('visibilitychange', handleVisibilityChange);
       document.removeEventListener('keydown', handleGlobalKeyDown);
+      window.removeEventListener('online', handleOnline);
+      editor.removeEventListener('blur', handleBlur);
+      window.removeEventListener('focus', handleWindowFocus);
     };
   }, []);
 
