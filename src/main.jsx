@@ -79,7 +79,7 @@ function createId() {
 }
 
 function createChapter(content = '') {
-  return { id: createId(), content };
+  return { id: createId(), content, synced: false };
 }
 
 function createEmptyState() {
@@ -107,6 +107,7 @@ function normalizeState(input) {
       id: typeof chapter?.id === 'string' && chapter.id ? chapter.id : createId(),
       content: typeof chapter?.content === 'string' ? chapter.content : '',
       updated_at: Number(chapter?.updated_at) || Date.now(),
+      synced: typeof chapter?.synced === 'boolean' ? chapter.synced : false,
     }))
     .filter(Boolean);
 
@@ -139,12 +140,12 @@ function normalizeState(input) {
 }
 
 function getCurrentChapterIndex(state) {
-  const index = state.chapters.findIndex((chapter) => chapter.id === state.currentChapterId);
-  return index >= 0 ? index : 0;
+  return state.chapters.findIndex((chapter) => chapter.id === state.currentChapterId);
 }
 
 function getCurrentChapter(state) {
-  return state.chapters[getCurrentChapterIndex(state)] ?? state.chapters[0];
+  const index = getCurrentChapterIndex(state);
+  return index >= 0 ? state.chapters[index] : null;
 }
 
 function getSelectionOffsets(root) {
@@ -276,6 +277,11 @@ function App() {
   const isSyncingRef = useRef(false);
   const isSyncPendingRef = useRef(false);
   const isDeferredSyncUpdateRef = useRef(false);
+  const maxRemoteTimestampRef = useRef(0);
+
+  const getNextTimestamp = () => {
+    return Math.max(Date.now(), maxRemoteTimestampRef.current + 1);
+  };
 
   const [currentChapterIndex, setCurrentChapterIndex] = useState(0);
   const [isStatsOpen, setIsStatsOpen] = useState(false);
@@ -398,11 +404,15 @@ function App() {
       prevViewState.selectionEnd !== selectionEnd ||
       prevViewState.scrollTop !== window.scrollY;
 
+    const ts = getNextTimestamp();
     const chapterIndex = getCurrentChapterIndex(state);
+    if (chapterIndex < 0) {
+      return;
+    }
     state.chapters[chapterIndex] = {
       ...chapter,
       content,
-      updated_at: contentChanged ? Date.now() : (chapter.updated_at || Date.now()),
+      updated_at: contentChanged ? ts : (chapter.updated_at || ts),
     };
 
     state.chapterViewStateById[chapter.id] = {
@@ -412,7 +422,7 @@ function App() {
     };
 
     if (contentChanged || viewStateChanged) {
-      state.metadata_updated_at = Date.now();
+      state.metadata_updated_at = ts;
     }
 
     updateWordCounts();
@@ -441,6 +451,19 @@ function App() {
 
       const remoteChapters = chaptersRes.data || [];
       const remoteMetadata = metadataRes.data || null;
+
+      if (remoteMetadata) {
+        maxRemoteTimestampRef.current = Math.max(
+          maxRemoteTimestampRef.current,
+          new Date(remoteMetadata.updated_at).getTime()
+        );
+      }
+      for (const remoteCh of remoteChapters) {
+        maxRemoteTimestampRef.current = Math.max(
+          maxRemoteTimestampRef.current,
+          new Date(remoteCh.updated_at).getTime()
+        );
+      }
 
       const localState = stateRef.current;
       let localUpdated = false;
@@ -486,18 +509,55 @@ function App() {
         }
       }
 
-      const activeChapterOrder = activeMetadata.chapter_order || [];
       const remoteChaptersMap = new Map(remoteChapters.map((c) => [c.id, c]));
       const localChaptersMap = new Map(localState.chapters.map((c) => [c.id, c]));
+
+      const activeChapterOrder = activeMetadata.chapter_order || [];
+      const finalChapterOrder = [...activeChapterOrder];
+
+      // Append local chapters that are new or exist on remote
+      for (const localCh of localState.chapters) {
+        if (!finalChapterOrder.includes(localCh.id)) {
+          const remoteChExists = remoteChaptersMap.has(localCh.id);
+          const isNewLocal = !remoteChExists && (localCh.synced === false || !remoteMetadata || (localCh.updated_at || 0) > new Date(remoteMetadata.updated_at).getTime());
+          if (isNewLocal || remoteChExists) {
+            finalChapterOrder.push(localCh.id);
+          }
+        }
+      }
+
+      // Append remote chapters that are new and not yet downloaded
+      for (const remoteCh of remoteChapters) {
+        if (!finalChapterOrder.includes(remoteCh.id)) {
+          const localChExists = localChaptersMap.has(remoteCh.id);
+          const isNewRemote = !localChExists && (new Date(remoteCh.updated_at).getTime() > (localState.metadata_updated_at || 0));
+          if (isNewRemote) {
+            finalChapterOrder.push(remoteCh.id);
+          }
+        }
+      }
+
+      // Check if order changed and update metadata
+      const orderChanged = finalChapterOrder.length !== activeChapterOrder.length ||
+        finalChapterOrder.some((id, idx) => id !== activeChapterOrder[idx]);
+
+      if (orderChanged) {
+        activeMetadata.chapter_order = finalChapterOrder;
+        activeMetadata.updated_at = new Date().toISOString();
+        localMetadataWinning = true;
+        localUpdated = true;
+      }
+
       const mergedChapters = [];
 
-      for (const chapterId of activeChapterOrder) {
+      for (const chapterId of finalChapterOrder) {
         const localCh = localChaptersMap.get(chapterId);
         const remoteCh = remoteChaptersMap.get(chapterId);
 
         if (localCh && remoteCh) {
           const localTime = localCh.updated_at || 0;
           const remoteTime = new Date(remoteCh.updated_at).getTime();
+          localCh.synced = true;
 
           if (localTime > remoteTime) {
             chaptersToUpsert.push({
@@ -512,6 +572,7 @@ function App() {
                 id: chapterId,
                 content: remoteCh.content,
                 updated_at: remoteTime,
+                synced: true,
               };
               mergedChapters.push(updatedCh);
               localUpdated = true;
@@ -533,6 +594,7 @@ function App() {
             id: chapterId,
             content: remoteCh.content,
             updated_at: new Date(remoteCh.updated_at).getTime(),
+            synced: true,
           };
           mergedChapters.push(newLocalCh);
           localUpdated = true;
@@ -552,9 +614,9 @@ function App() {
         localUpdated = true;
       }
 
-      const activeChapterOrderSet = new Set(activeChapterOrder);
+      const finalChapterOrderSet = new Set(finalChapterOrder);
       for (const remoteCh of remoteChapters) {
-        if (!activeChapterOrderSet.has(remoteCh.id)) {
+        if (!finalChapterOrderSet.has(remoteCh.id)) {
           chaptersToDelete.push(remoteCh.id);
         }
       }
@@ -566,7 +628,20 @@ function App() {
       }
 
       if (chaptersToUpsert.length > 0) {
-        networkPromises.push(supabase.from('chapters').upsert(chaptersToUpsert));
+        const upsertPromise = supabase.from('chapters').upsert(chaptersToUpsert).then(async (res) => {
+          if (!res.error) {
+            const state = stateRef.current;
+            const upsertedIds = new Set(chaptersToUpsert.map((c) => c.id));
+            state.chapters.forEach((ch) => {
+              if (upsertedIds.has(ch.id)) {
+                ch.synced = true;
+              }
+            });
+            await writeState(dbRef.current, state).catch(console.error);
+          }
+          return res;
+        });
+        networkPromises.push(upsertPromise);
       }
 
       if (chaptersToDelete.length > 0) {
@@ -580,27 +655,28 @@ function App() {
       }
 
       if (localUpdated) {
+        const isEditing = document.activeElement === editorRef.current;
+        if (isEditing) {
+          isDeferredSyncUpdateRef.current = true;
+          return;
+        }
+
         const normalized = normalizeState(localState);
         stateRef.current = normalized;
         await writeState(dbRef.current, normalized);
 
-        const isEditing = document.activeElement === editorRef.current;
         const editor = editorRef.current;
         if (editor) {
           const activeCh = getCurrentChapter(normalized);
-          const contentChanged = editor.textContent !== activeCh.content;
-          const currentFontSize = parseFloat(editor.style.fontSize) || normalized.fontSize;
-          const fontSizeChanged = currentFontSize !== normalized.fontSize;
-          const indexChanged = getCurrentChapterIndex(normalized) !== currentChapterIndex;
+          if (activeCh) {
+            const contentChanged = editor.textContent !== activeCh.content;
+            const currentFontSize = parseFloat(editor.style.fontSize) || normalized.fontSize;
+            const fontSizeChanged = currentFontSize !== normalized.fontSize;
+            const indexChanged = getCurrentChapterIndex(normalized) !== currentChapterIndex;
 
-          if (contentChanged || fontSizeChanged || indexChanged) {
-            if (!isEditing) {
+            if (contentChanged || fontSizeChanged || indexChanged) {
               setCurrentChapterIndex(getCurrentChapterIndex(normalized));
               renderCurrentChapter();
-            } else {
-              isDeferredSyncUpdateRef.current = true;
-              editor.style.fontSize = `${normalized.fontSize}px`;
-              syncEditorHeight();
             }
           }
         }
@@ -644,11 +720,21 @@ function App() {
       });
   };
 
-  const persistNow = () => {
-    captureCurrentChapterState();
+  const persistNow = (immediateSync = false, skipCapture = false) => {
+    if (!skipCapture) {
+      captureCurrentChapterState();
+    }
     const snapshot = normalizeState(JSON.parse(JSON.stringify(stateRef.current)));
     enqueuePersist(snapshot);
-    scheduleCloudSync();
+    if (immediateSync) {
+      if (cloudSyncTimerRef.current) {
+        clearTimeout(cloudSyncTimerRef.current);
+        cloudSyncTimerRef.current = null;
+      }
+      syncWithCloud();
+    } else {
+      scheduleCloudSync();
+    }
   };
 
   const schedulePersist = () => {
@@ -695,9 +781,10 @@ function App() {
 
     captureCurrentChapterState();
     state.currentChapterId = state.chapters[nextIndex].id;
+    state.metadata_updated_at = getNextTimestamp();
     setCurrentChapterIndex(nextIndex);
     renderCurrentChapter();
-    persistNow();
+    persistNow(true);
   };
 
   const createChapterAfterCurrent = () => {
@@ -705,7 +792,11 @@ function App() {
 
     const state = stateRef.current;
     const currentIndex = getCurrentChapterIndex(state);
-    const nextChapter = createChapter('');
+    const ts = getNextTimestamp();
+    const nextChapter = {
+      ...createChapter(''),
+      updated_at: ts,
+    };
     state.chapters.splice(currentIndex + 1, 0, nextChapter);
     state.chapterViewStateById[nextChapter.id] = {
       selectionStart: 0,
@@ -713,10 +804,11 @@ function App() {
       scrollTop: 0,
     };
     state.currentChapterId = nextChapter.id;
+    state.metadata_updated_at = ts;
 
     setCurrentChapterIndex(currentIndex + 1);
     renderCurrentChapter();
-    persistNow();
+    persistNow(true);
   };
 
   const prepareDeleteCurrentChapter = () => {
@@ -759,11 +851,12 @@ function App() {
 
     const nextIndex = deleteIndex > 0 ? deleteIndex - 1 : 0;
     state.currentChapterId = state.chapters[nextIndex].id;
+    state.metadata_updated_at = getNextTimestamp();
     setCurrentChapterIndex(nextIndex);
     setDeleteConfirm(null);
     setIsPickerOpen(false);
     renderCurrentChapter();
-    persistNow();
+    persistNow(true);
   };
 
   const applyFontSize = (nextSize) => {
@@ -775,9 +868,10 @@ function App() {
     const { selectionStart, selectionEnd } = getSelectionOffsets(editor);
     const scrollTop = window.scrollY ?? 0;
     stateRef.current.fontSize = clamp(nextSize, MIN_FONT_SIZE, MAX_FONT_SIZE);
+    stateRef.current.metadata_updated_at = getNextTimestamp();
     editor.style.fontSize = `${stateRef.current.fontSize}px`;
     syncEditorHeight();
-    persistNow();
+    persistNow(true);
     restorePageScroll(scrollTop);
     setSelectionOffsets(editor, selectionStart ?? 0, selectionEnd ?? selectionStart ?? 0);
   };
@@ -818,6 +912,17 @@ function App() {
             if (!chaptersRes.error && !metadataRes.error && metadataRes.data) {
               const remoteChapters = chaptersRes.data || [];
               const remoteMetadata = metadataRes.data;
+
+              maxRemoteTimestampRef.current = Math.max(
+                maxRemoteTimestampRef.current,
+                new Date(remoteMetadata.updated_at).getTime()
+              );
+              for (const remoteCh of remoteChapters) {
+                maxRemoteTimestampRef.current = Math.max(
+                  maxRemoteTimestampRef.current,
+                  new Date(remoteCh.updated_at).getTime()
+                );
+              }
 
               // Reconstruct the stored book shape from remote tables
               const chapterOrder = remoteMetadata.chapter_order || [];
@@ -922,11 +1027,12 @@ function App() {
       const newContent = normalizeEditorText();
       const contentChanged = chapter.content !== newContent;
 
+      const ts = getNextTimestamp();
       const chapterIndex = getCurrentChapterIndex(state);
       state.chapters[chapterIndex] = {
         ...chapter,
         content: newContent,
-        updated_at: contentChanged ? Date.now() : (chapter.updated_at || Date.now()),
+        updated_at: contentChanged ? ts : (chapter.updated_at || ts),
       };
 
       const { selectionStart, selectionEnd } = getSelectionOffsets(editor);
@@ -944,7 +1050,7 @@ function App() {
       };
 
       if (contentChanged || viewStateChanged) {
-        state.metadata_updated_at = Date.now();
+        state.metadata_updated_at = ts;
       }
 
       syncEditorHeight();
@@ -1033,7 +1139,7 @@ function App() {
         return;
       }
 
-      persistNow();
+      persistNow(true, true);
     };
 
     const handleVisibilityChange = () => {
@@ -1041,7 +1147,7 @@ function App() {
         return;
       }
       if (document.visibilityState === 'hidden') {
-        persistNow();
+        persistNow(false, true);
       } else if (document.visibilityState === 'visible') {
         syncWithCloud();
       }
@@ -1074,11 +1180,12 @@ function App() {
     };
 
     const handleBlur = () => {
+      if (!mountedRef.current) {
+        return;
+      }
       if (isDeferredSyncUpdateRef.current) {
         isDeferredSyncUpdateRef.current = false;
-        const normalized = normalizeState(stateRef.current);
-        setCurrentChapterIndex(getCurrentChapterIndex(normalized));
-        renderCurrentChapter();
+        syncWithCloud();
       }
     };
 
