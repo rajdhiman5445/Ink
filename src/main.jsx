@@ -278,6 +278,7 @@ function App() {
   const isSyncPendingRef = useRef(false);
   const isDeferredSyncUpdateRef = useRef(false);
   const maxRemoteTimestampRef = useRef(0);
+  const hasTypedRef = useRef(false);
 
   const getNextTimestamp = () => {
     return Math.max(Date.now(), maxRemoteTimestampRef.current + 1);
@@ -656,7 +657,8 @@ function App() {
 
       if (localUpdated) {
         const isEditing = document.activeElement === editorRef.current;
-        if (isEditing) {
+        const isUserTyping = isEditing && hasTypedRef.current;
+        if (isUserTyping) {
           isDeferredSyncUpdateRef.current = true;
           return;
         }
@@ -780,6 +782,7 @@ function App() {
     }
 
     captureCurrentChapterState();
+    hasTypedRef.current = false;
     state.currentChapterId = state.chapters[nextIndex].id;
     state.metadata_updated_at = getNextTimestamp();
     setCurrentChapterIndex(nextIndex);
@@ -803,6 +806,7 @@ function App() {
       selectionEnd: 0,
       scrollTop: 0,
     };
+    hasTypedRef.current = false;
     state.currentChapterId = nextChapter.id;
     state.metadata_updated_at = ts;
 
@@ -850,6 +854,7 @@ function App() {
     }
 
     const nextIndex = deleteIndex > 0 ? deleteIndex - 1 : 0;
+    hasTypedRef.current = false;
     state.currentChapterId = state.chapters[nextIndex].id;
     state.metadata_updated_at = getNextTimestamp();
     setCurrentChapterIndex(nextIndex);
@@ -1017,6 +1022,7 @@ function App() {
       if (!mountedRef.current) {
         return;
       }
+      hasTypedRef.current = true;
 
       const state = stateRef.current;
       const chapter = getCurrentChapter(state);
@@ -1183,6 +1189,7 @@ function App() {
       if (!mountedRef.current) {
         return;
       }
+      hasTypedRef.current = false;
       if (isDeferredSyncUpdateRef.current) {
         isDeferredSyncUpdateRef.current = false;
         syncWithCloud();

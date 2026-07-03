@@ -78,3 +78,38 @@ Even if the active chapter's content is updated from the cloud, performing a tex
 ### The Fix
 * Added a deferred update state: if `localUpdated = true` but the editor is focused (`document.activeElement === editorRef.current`), the app flags `isDeferredSyncUpdateRef.current = true` and holds off re-rendering the editor.
 * Attached a `'blur'` listener to the editor. When focus leaves the editor (e.g., when the user pauses and clicks away or switches chapters), the deferred updates are instantly applied, ensuring the screen is always current without disrupting active writing.
+
+---
+
+## 6. Challenge: Empty Chapter Deletion & Fallback Overwrite (Data Loss)
+
+### The Symptom
+Creating a new empty chapter (e.g., Chapter 10) and then immediately closing or refreshing the tab would sometimes cause the new chapter to disappear. Additionally, upon reopening, the application would default back to Chapter 1, and Chapter 1's content would be wiped out (empty).
+
+### The Diagnostic
+1. **Unawaited IndexedDB Writes**: The background sync updated the `synced: true` flag and called `writeState` to IndexedDB, but this write promise was not awaited. The UI showed "Synced", the user closed the tab, and the browser aborted the incomplete write. On restart, the mismatch made the startup sync believe Chapter 10 was deleted on another device, removing it.
+2. **Missing Active Chapter Fallback**: Because Chapter 10 was deleted, `getCurrentChapterIndex` returned `-1` (not found). The function had a fallback to index `0` (Chapter 1).
+3. **Empty DOM Overwrite**: On tab close (`pagehide`), `persistNow()` called `captureCurrentChapterState()`. Since the browser was unloading, the editor DOM text content returned empty `""`. Because of the fallback, this empty text was written to **Chapter 1**, wiping out all of Chapter 1's data.
+
+### The Fix
+* **Awaited Synced Writes**: Made the sync promise chain await `writeState(...)` before resolving and displaying "Synced".
+* **Removed Fallback & Early Abort**: Modified `getCurrentChapterIndex` to return `-1` if the chapter is missing. Updated `captureCurrentChapterState()` and `handleInput()` to return early and abort if the index is `< 0`, preventing any out-of-sync DOM reads from overwriting Chapter 1.
+* **Skip DOM Reads on Unload**: Set the `pagehide` and `visibilitychange` (hidden) events to skip DOM text reading (`skipCapture`), writing the in-memory state directly to prevent reading blank unloading elements.
+
+---
+
+## 7. Challenge: Automatic Startup Focus Blocking Sync
+
+### The Symptom
+Writing edits on Device B today, then opening Device A (which was closed yesterday) would result in Device A loading yesterday's version from local storage and refusing to pull/overwrite it with today's cloud updates.
+
+### The Diagnostic
+* When Device A mounted, `renderCurrentChapter()` automatically focused the editor to allow immediate typing.
+* The startup background sync finished, saw the remote today's version was newer, and prepared to update the editor.
+* However, because the editor was automatically focused, `document.activeElement === editor` evaluated to `true` (`isEditing`). The sync engine deferred the update to avoid disrupting the user.
+* Since the user hadn't typed but the sync was deferred, they remained looking at yesterday's local text.
+
+### The Fix
+* Introduced a `hasTypedRef` tracker. It is set to `true` when the user triggers a keystroke (`handleInput`) and reset to `false` on blur or chapter transitions.
+* Modified the sync deferral check to only defer if the user has actually typed: `const isUserTyping = isEditing && hasTypedRef.current;`.
+* On startup, the automatic focus is ignored (since they haven't typed yet), allowing the cloud update to load immediately.
